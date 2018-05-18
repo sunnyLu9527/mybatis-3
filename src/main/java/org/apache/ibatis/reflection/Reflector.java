@@ -1,5 +1,5 @@
 /**
- *    Copyright 2009-2017 the original author or authors.
+ *    Copyright 2009-2018 the original author or authors.
  *
  *    Licensed under the Apache License, Version 2.0 (the "License");
  *    you may not use this file except in compliance with the License.
@@ -77,7 +77,7 @@ public class Reflector {
     Constructor<?>[] consts = clazz.getDeclaredConstructors();
     for (Constructor<?> constructor : consts) {
       if (constructor.getParameterTypes().length == 0) {
-        if (canAccessPrivateMethods()) {
+        if (canControlMemberAccessible()) {
           try {
             constructor.setAccessible(true);
           } catch (Exception e) {
@@ -254,7 +254,7 @@ public class Reflector {
   private void addFields(Class<?> clazz) {
     Field[] fields = clazz.getDeclaredFields();
     for (Field field : fields) {
-      if (canAccessPrivateMethods()) {
+      if (canControlMemberAccessible()) {
         try {
           field.setAccessible(true);
         } catch (Exception e) {
@@ -313,7 +313,7 @@ public class Reflector {
   private Method[] getClassMethods(Class<?> cls) {
     Map<String, Method> uniqueMethods = new HashMap<String, Method>();
     Class<?> currentClass = cls;
-    while (currentClass != null) {
+    while (currentClass != null && currentClass != Object.class) {
       addUniqueMethods(uniqueMethods, currentClass.getDeclaredMethods());
 
       // we also need to look for interface methods -
@@ -339,7 +339,7 @@ public class Reflector {
         // if it is known, then an extended class must have
         // overridden a method
         if (!uniqueMethods.containsKey(signature)) {
-          if (canAccessPrivateMethods()) {
+          if (canControlMemberAccessible()) {
             try {
               currentMethod.setAccessible(true);
             } catch (Exception e) {
@@ -372,7 +372,13 @@ public class Reflector {
     return sb.toString();
   }
 
-  private static boolean canAccessPrivateMethods() {
+  /**
+   * Checks whether can control member accessible.
+   *
+   * @return If can control member accessible, it return {@literal true}
+   * @since 3.5.0
+   */
+  public static boolean canControlMemberAccessible() {
     try {
       SecurityManager securityManager = System.getSecurityManager();
       if (null != securityManager) {
