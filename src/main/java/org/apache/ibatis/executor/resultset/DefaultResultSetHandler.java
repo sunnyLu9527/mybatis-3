@@ -70,7 +70,7 @@ import java.util.Set;
  */
 public class DefaultResultSetHandler implements ResultSetHandler {
 
-  private static final Object DEFERED = new Object();
+  private static final Object DEFERRED = new Object();
 
   private final Executor executor;
   private final Configuration configuration;
@@ -347,11 +347,12 @@ public class DefaultResultSetHandler implements ResultSetHandler {
   private void handleRowValuesForSimpleResultMap(ResultSetWrapper rsw, ResultMap resultMap, ResultHandler<?> resultHandler, RowBounds rowBounds, ResultMapping parentMapping)
       throws SQLException {
     DefaultResultContext<Object> resultContext = new DefaultResultContext<>();
-    skipRows(rsw.getResultSet(), rowBounds);
-    while (shouldProcessMoreRows(resultContext, rowBounds) && rsw.getResultSet().next()) {
-      ResultMap discriminatedResultMap = resolveDiscriminatedResultMap(rsw.getResultSet(), resultMap, null);
-      Object rowValue = getRowValue(rsw, discriminatedResultMap);
-      storeObject(resultHandler, resultContext, rowValue, parentMapping, rsw.getResultSet());
+    ResultSet resultSet = rsw.getResultSet();
+    skipRows(resultSet, rowBounds);
+    while (shouldProcessMoreRows(resultContext, rowBounds) && !resultSet.isClosed() && resultSet.next()) {
+      ResultMap discriminatedResultMap = resolveDiscriminatedResultMap(resultSet, resultMap, null);
+      Object rowValue = getRowValue(rsw, discriminatedResultMap, null);
+      storeObject(resultHandler, resultContext, rowValue, parentMapping, resultSet);
     }
   }
 
@@ -380,7 +381,9 @@ public class DefaultResultSetHandler implements ResultSetHandler {
       }
     } else {
       for (int i = 0; i < rowBounds.getOffset(); i++) {
-        rs.next();
+        if (!rs.next()) {
+          break;
+        }
       }
     }
   }
@@ -389,16 +392,16 @@ public class DefaultResultSetHandler implements ResultSetHandler {
   // GET VALUE FROM ROW FOR SIMPLE RESULT MAP
   //
 
-  private Object getRowValue(ResultSetWrapper rsw, ResultMap resultMap) throws SQLException {
+  private Object getRowValue(ResultSetWrapper rsw, ResultMap resultMap, String columnPrefix) throws SQLException {
     final ResultLoaderMap lazyLoader = new ResultLoaderMap();
-    Object rowValue = createResultObject(rsw, resultMap, lazyLoader, null);
+    Object rowValue = createResultObject(rsw, resultMap, lazyLoader, columnPrefix);
     if (rowValue != null && !hasTypeHandlerForResultObject(rsw, resultMap.getType())) {
       final MetaObject metaObject = configuration.newMetaObject(rowValue);
       boolean foundValues = this.useConstructorMappings;
       if (shouldApplyAutomaticMappings(resultMap, false)) {
-        foundValues = applyAutomaticMappings(rsw, resultMap, metaObject, null) || foundValues;
+        foundValues = applyAutomaticMappings(rsw, resultMap, metaObject, columnPrefix) || foundValues;
       }
-      foundValues = applyPropertyMappings(rsw, resultMap, metaObject, lazyLoader, null) || foundValues;
+      foundValues = applyPropertyMappings(rsw, resultMap, metaObject, lazyLoader, columnPrefix) || foundValues;
       foundValues = lazyLoader.size() > 0 || foundValues;
       rowValue = foundValues || configuration.isReturnInstanceForEmptyRow() ? rowValue : null;
     }
@@ -440,7 +443,7 @@ public class DefaultResultSetHandler implements ResultSetHandler {
         final String property = propertyMapping.getProperty();
         if (property == null) {
           continue;
-        } else if (value == DEFERED) {
+        } else if (value == DEFERRED) {
           foundValues = true;
           continue;
         }
@@ -462,7 +465,7 @@ public class DefaultResultSetHandler implements ResultSetHandler {
       return getNestedQueryMappingValue(rs, metaResultObject, propertyMapping, lazyLoader, columnPrefix);
     } else if (propertyMapping.getResultSet() != null) {
       addPendingChildRelation(rs, metaResultObject, propertyMapping);   // TODO is that OK?
-      return DEFERED;
+      return DEFERRED;
     } else {
       final TypeHandler<?> typeHandler = propertyMapping.getTypeHandler();
       final String column = prependPrefix(propertyMapping.getColumn(), columnPrefix);
@@ -629,14 +632,12 @@ public class DefaultResultSetHandler implements ResultSetHandler {
           value = getNestedQueryConstructorValue(rsw.getResultSet(), constructorMapping, columnPrefix);
         } else if (constructorMapping.getNestedResultMapId() != null) {
           final ResultMap resultMap = configuration.getResultMap(constructorMapping.getNestedResultMapId());
-          value = getRowValue(rsw, resultMap);
+          value = getRowValue(rsw, resultMap, constructorMapping.getColumnPrefix());
         } else {
           final TypeHandler<?> typeHandler = constructorMapping.getTypeHandler();
           value = typeHandler.getResult(rsw.getResultSet(), prependPrefix(column, columnPrefix));
         }
-      } catch (ResultMapException e) {
-        throw new ExecutorException("Could not process result for mapping: " + constructorMapping, e);
-      } catch (SQLException e) {
+      } catch (ResultMapException | SQLException e) {
         throw new ExecutorException("Could not process result for mapping: " + constructorMapping, e);
       }
       constructorArgTypes.add(parameterType);
@@ -746,12 +747,12 @@ public class DefaultResultSetHandler implements ResultSetHandler {
       final Class<?> targetType = propertyMapping.getJavaType();
       if (executor.isCached(nestedQuery, key)) {
         executor.deferLoad(nestedQuery, metaResultObject, property, key, targetType);
-        value = DEFERED;
+        value = DEFERRED;
       } else {
         final ResultLoader resultLoader = new ResultLoader(configuration, executor, nestedQuery, nestedQueryParameterObject, targetType, key, nestedBoundSql);
         if (propertyMapping.isLazy()) {
           lazyLoader.addLoader(property, metaResultObject, resultLoader);
-          value = DEFERED;
+          value = DEFERRED;
         } else {
           value = resultLoader.loadResult();
         }
@@ -848,28 +849,29 @@ public class DefaultResultSetHandler implements ResultSetHandler {
 
   private void handleRowValuesForNestedResultMap(ResultSetWrapper rsw, ResultMap resultMap, ResultHandler<?> resultHandler, RowBounds rowBounds, ResultMapping parentMapping) throws SQLException {
     final DefaultResultContext<Object> resultContext = new DefaultResultContext<>();
-    skipRows(rsw.getResultSet(), rowBounds);
+    ResultSet resultSet = rsw.getResultSet();
+    skipRows(resultSet, rowBounds);
     Object rowValue = previousRowValue;
-    while (shouldProcessMoreRows(resultContext, rowBounds) && rsw.getResultSet().next()) {
-      final ResultMap discriminatedResultMap = resolveDiscriminatedResultMap(rsw.getResultSet(), resultMap, null);
+    while (shouldProcessMoreRows(resultContext, rowBounds) && !resultSet.isClosed() && resultSet.next()) {
+      final ResultMap discriminatedResultMap = resolveDiscriminatedResultMap(resultSet, resultMap, null);
       final CacheKey rowKey = createRowKey(discriminatedResultMap, rsw, null);
       Object partialObject = nestedResultObjects.get(rowKey);
       // issue #577 && #542
       if (mappedStatement.isResultOrdered()) {
         if (partialObject == null && rowValue != null) {
           nestedResultObjects.clear();
-          storeObject(resultHandler, resultContext, rowValue, parentMapping, rsw.getResultSet());
+          storeObject(resultHandler, resultContext, rowValue, parentMapping, resultSet);
         }
         rowValue = getRowValue(rsw, discriminatedResultMap, rowKey, null, partialObject);
       } else {
         rowValue = getRowValue(rsw, discriminatedResultMap, rowKey, null, partialObject);
         if (partialObject == null) {
-          storeObject(resultHandler, resultContext, rowValue, parentMapping, rsw.getResultSet());
+          storeObject(resultHandler, resultContext, rowValue, parentMapping, resultSet);
         }
       }
     }
     if (rowValue != null && mappedStatement.isResultOrdered() && shouldProcessMoreRows(resultContext, rowBounds)) {
-      storeObject(resultHandler, resultContext, rowValue, parentMapping, rsw.getResultSet());
+      storeObject(resultHandler, resultContext, rowValue, parentMapping, resultSet);
       previousRowValue = null;
     } else if (rowValue != null) {
       previousRowValue = rowValue;
